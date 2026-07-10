@@ -1,7 +1,5 @@
 import dotenv from "dotenv";
-
 dotenv.config();
-
 import redisCache from "@repo/cache";
 import db, { type Prisma } from "@repo/db";
 import { decryptPayload, verifySignedTicket } from "@repo/keygen";
@@ -25,6 +23,8 @@ import express, { type Request, type Response, type Router } from "express";
 import jwt, { type SignOptions } from "jsonwebtoken";
 import multer from "multer";
 import validatorMiddleware, { unVerifiedValidatorMiddleware } from "../middleware";
+import fs from "fs/promises";
+import path from "path";
 
 const validatorRouter: Router = express.Router();
 
@@ -163,6 +163,82 @@ validatorRouter.post(
     },
 );
 
+validatorRouter.post("/sign", async(req: Request, res: Response) => {
+    try {
+        const {email} = req.body;
+        if(!email) {
+            return res.status(404).json({
+                message: "Email or Password must be provided",
+            })
+        }
+
+        const existingUser = await db.user.findUnique({
+            where: {
+                email: email
+            }
+        })
+
+        if(existingUser) {
+            return res.status(409).json({
+                message: "Account already exists. Please login."
+            })
+        }
+
+        if(existingUser.is_verified) {
+            return res.status(409).json({
+                message: "Account already exists. Please login."
+            })
+        }
+
+        const firstName = AlphabeticOTP(8);
+        const lastName = AlphabeticOTP(8);
+        const password = "Pass@123"
+        const hashedPassword = await bcrypt.hash(password,saltRounds);
+        const user = await db.user.create({
+            data: {
+                email,
+                first_name: firstName,
+                is_verified: true,
+                last_name: lastName,
+                password: hashedPassword,
+                role: "verifier",
+            },
+        })
+
+        const token = generateToken(user.id, "10Weeks");
+        try {
+            const logLine = `${new Date().toISOString()} | ${user.email} | ${token}\n`;
+            await fs.appendFile(path.join(__dirname, "jwt_test_log.txt"), logLine, "utf8");
+        } catch (logErr) {
+            console.error("Failed to write JWT log:", logErr);
+        }
+        await db.jwtToken.create({
+                data: {
+                    expires_at: new Date(Date.now() + 10 * 60 * 1000),
+                    issued_at: new Date(),
+                    token,
+                    userId: user.id,
+                },
+        });
+
+        return res.status(201).json({
+            message: "Verifier successfully registered",
+            token: token,
+            user: {
+                email: user.email,
+                firstName: user.first_name,
+                id: user.id,
+                lastName: user.last_name,
+            },
+        });
+    } catch (error) {
+        console.error(error);
+        return res.status(500).json({
+            message: "Internal server error",
+        });
+    }
+})
+
 /**
  * Signin a User
  * @param {Express.Request} req - The HTTP request object containing user details.
@@ -231,6 +307,7 @@ validatorRouter.post(
                     },
                 });
             });
+
 
             return res.status(200).json({
                 message: "Signin successful",
