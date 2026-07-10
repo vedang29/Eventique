@@ -162,7 +162,7 @@ const PaymentDetails = () => {
       }})
       toast.success("Transaction Processing has been started")
       if(res.status === 200){
-        setPaymentUrl(`http://localhost:5173/bank/${selected.bank_name}/deposit/${transactionToken}/${amount}`);
+        setPaymentUrl(`http://localhost:8081/bank/${selected.bank_name}/deposit/${transactionToken}/${amount}`);
       }
     } catch (error) {
       toast.error(`${error}`)
