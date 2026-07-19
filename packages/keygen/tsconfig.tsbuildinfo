@@ -1,1 +1,1 @@
-{"root":["./src/index.ts","./src/benchmark/ed25519.microbench.ts","./src/benchmark/ed25519.system.microbench.ts","./src/tests/componentBreakdownProfiler.ts","./src/tests/keytest.ts"],"version":"5.8.3"}
+{"root":["./src/index.ts","./src/benchmark/ed25519.microbench.ts","./src/benchmark/ed25519.system.microbench.ts","./src/tests/componentbreakdownprofiler.ts","./src/tests/keytest.ts"],"version":"5.8.3"}

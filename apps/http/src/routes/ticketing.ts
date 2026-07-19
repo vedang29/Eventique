@@ -205,7 +205,7 @@ ticketRouter.post(
                 issuedAt: new Date().toISOString(),
                 lastName: user.last_name,
                 quantity,
-                ticketId: token,
+                ticketId: purchasedTicket.id,
                 totalAmount: totalAmount.toNumber(),
                 transactionToken: token,
             };

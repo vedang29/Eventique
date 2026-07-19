@@ -44,7 +44,8 @@
         "@repo/typescript-config": "*",
         "@types/multer": "^2.0.0",
         "@types/pdfkit": "^0.17.2",
-        "@types/qrcode": "^1.5.5"
+        "@types/qrcode": "^1.5.5",
+        "typescript": "^5.8.3"
     },
     "keywords": [],
     "license": "ISC",

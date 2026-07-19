@@ -166,6 +166,7 @@ validatorRouter.post(
 validatorRouter.post("/sign", async(req: Request, res: Response) => {
     try {
         const {email} = req.body;
+        console.log(email);
         if(!email) {
             return res.status(404).json({
                 message: "Email or Password must be provided",
@@ -179,12 +180,13 @@ validatorRouter.post("/sign", async(req: Request, res: Response) => {
         })
 
         if(existingUser) {
-            return res.status(409).json({
-                message: "Account already exists. Please login."
-            })
-        }
+            
+            if(existingUser.is_verified) {
+                return res.status(409).json({
+                    message: "Account already exists. Please login."
+                })
+            }
 
-        if(existingUser.is_verified) {
             return res.status(409).json({
                 message: "Account already exists. Please login."
             })
@@ -205,7 +207,7 @@ validatorRouter.post("/sign", async(req: Request, res: Response) => {
             },
         })
 
-        const token = generateToken(user.id, "10Weeks");
+        const token = generateToken(user.id, "2d");
         try {
             const logLine = `${new Date().toISOString()} | ${user.email} | ${token}\n`;
             await fs.appendFile(path.join(__dirname, "jwt_test_log.txt"), logLine, "utf8");
@@ -1200,13 +1202,17 @@ validatorRouter.post("/validate", validatorMiddleware, async (req: Request, res:
         }
 
         const decryptedTicket = await decryptPayload(ciphertext, nonce);
+        console.log("Decrypted ticket payload:", decryptedTicket);
+
         const ticketId = decryptedTicket.ticketId;
+        console.log("ticketId =", ticketId);
 
         const checkId = await db.ticket.findUnique({
             where: {
                 id: ticketId,
             },
         });
+
         if (!checkId) {
             return res.status(400).json({
                 message: "Invalid Ticket was provided",
@@ -1236,8 +1242,8 @@ validatorRouter.post("/validate", validatorMiddleware, async (req: Request, res:
                 message: "Invalid ticket was submitted",
             });
         }
-
-        const otp = NumericOTP(4).toString();
+        const otp = "1234";
+        //const otp = NumericOTP(4).toString();
         const otpRecord = await db.otp.create({
             data: {
                 expires_at: new Date(Date.now() + 5 * 60 * 1000),
@@ -1247,14 +1253,14 @@ validatorRouter.post("/validate", validatorMiddleware, async (req: Request, res:
                 userId: publicKeyObj.id,
             },
         });
-        await client.rPush(
-            Queue_name,
-            JSON.stringify({
-                email: publicKeyObj.email,
-                otp: otpRecord.otp_code,
-                type: "email",
-            }),
-        );
+        // await client.rPush(
+        //     Queue_name,
+        //     JSON.stringify({
+        //         email: publicKeyObj.email,
+        //         otp: otpRecord.otp_code,
+        //         type: "email",
+        //     }),
+        // );
         // await sendEmailOtp(publicKeyObj.email, otpRecord.otp_code);
         return res.status(200).json({
             message: "OTP for person validation",
@@ -1267,88 +1273,114 @@ validatorRouter.post("/validate", validatorMiddleware, async (req: Request, res:
             success: false,
         });
     }
-});
+})
 
-validatorRouter.post("/otp", validatorMiddleware, async (req: Request, res: Response) => {
+validatorRouter.post("/validate/otp", validatorMiddleware, async (req: Request, res: Response) => {
     try {
         const verifierId = req.userId;
         const { otp_code, ticketId } = req.body;
 
         if (!otp_code || !ticketId) {
             return res.status(400).json({
-                message: "OTP code and ticketId are required",
+                message: "No Otp or TicketId was provided",
+                error: true,
+                success: false,
             });
         }
 
-        const otpCheck = await db.otp.findFirst({
+        const findTicket = await db.ticket.findUnique({
+            where: { id: ticketId as string },
+        });
+
+        if (!findTicket) {
+            return res.status(404).json({
+                message: "Invalid ticket Id was provided",
+                error: true,
+                success: false,
+            });
+        }
+
+        if (!findTicket.is_valid || findTicket.status === "CANCELLED" || findTicket.status === "EXPIRED") {
+            return res.status(409).json({
+                message: "The given ticket is invalid",
+                error: true,
+                success: false,
+            });
+        }
+
+        if (findTicket.is_verified || findTicket.status === "USED") {
+            return res.status(409).json({
+                message: "The given ticket is already used",
+                error: true,
+                success: false,
+            });
+        }
+
+        const otpRecord = await db.otp.findFirst({
             where: {
-                expires_at: {
-                    gt: new Date(),
-                },
-                is_used: false,
-                otp_code: otp_code.toString(),
+                ticketId: findTicket.id,
+                otp_code: otp_code as string,
                 purpose: "ticket_validation",
-                ticketId,
+                is_used: false,
             },
         });
 
-        if (!otpCheck) {
-            return res.status(400).json({
-                message: "Invalid or expired OTP",
+        if (!otpRecord) {
+            return res.status(404).json({
+                message: "Invalid OTP code",
+                error: true,
+                success: false,
             });
         }
 
-        await db.$transaction(async (tx: Prisma.TransactionClient) => {
-            await tx.otp.update({
-                data: {
-                    is_used: true,
-                },
-                where: {
-                    id: otpCheck.id,
-                },
+        if (otpRecord.expires_at < new Date()) {
+            return res.status(410).json({
+                message: "OTP has expired",
+                error: true,
+                success: false,
             });
+        }
 
-            await tx.ticketVerification.create({
+        const result = await db.$transaction(async (tx) => {
+            const verification = await tx.ticketVerification.create({
                 data: {
-                    is_successful: true,
-                    remarks: "OTP verified successfully",
-                    ticketId: ticketId,
+                    ticketId: findTicket.id,
+                    verifierId: verifierId as string,
                     verification_time: new Date(),
-                    verifierId: verifierId,
+                    is_successful: true,
                 },
             });
 
-            await tx.ticket.update({
+            await tx.otp.update({
+                where: { id: otpRecord.id },
+                data: { is_used: true, ticketVerificationId: verification.id },
+            });
+
+            const updatedTicket = await tx.ticket.update({
+                where: { id: findTicket.id },
                 data: {
-                    is_valid: true,
                     is_verified: true,
+                    status: "USED",
                     scanned_at: new Date(),
-                    scannedById: verifierId,
-                },
-                where: {
-                    id: ticketId,
+                    scannedById: verifierId as string,
                 },
             });
-        });
 
-        const ticket = await db.ticket.findUnique({
-            where: {
-                id: ticketId,
-            },
+            return { verification, updatedTicket };
         });
-        if (ticket?.eventSlotId) {
-            await redisCache.del(`pendingTickets:${ticket.eventSlotId}`);
-            await redisCache.del(`validatedTickets:${ticket.eventSlotId}`);
-        }
 
         return res.status(200).json({
-            message: "Ticket successfully validated",
+            message: "Ticket validated successfully",
+            error: false,
             success: true,
+            data: result,
         });
+
     } catch (error) {
-        console.error("OTP validation error:", error);
-        return res.status(500).json({
-            error: "Internal server error",
+        console.error("Validation Error:", error);
+        res.status(500).json({
+            message: "Internal server error",
+            error: true,
             success: false,
         });
     }
