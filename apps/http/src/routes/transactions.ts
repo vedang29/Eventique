@@ -1,5 +1,3 @@
-// Transaction routes
-
 import db, { type Prisma } from "@repo/db";
 import { AlphanumericOTP } from "@repo/notifications";
 import { InitiateSchema } from "@repo/types";

@@ -1244,9 +1244,18 @@ validatorRouter.post("/validate", validatorMiddleware, async (req: Request, res:
         }
         const otp = "1234";
         //const otp = NumericOTP(4).toString();
+        await db.otp.updateMany({
+            where: {
+                ticketId: checkId.id,
+                purpose: "ticket_validation",
+                is_used: false,
+            },
+            data: { is_used: true },
+        });
+
         const otpRecord = await db.otp.create({
             data: {
-                expires_at: new Date(Date.now() + 5 * 60 * 1000),
+                expires_at: new Date(Date.now() + 60 * 60 * 1000),
                 otp_code: otp,
                 purpose: "ticket_validation",
                 ticketId: checkId.id,
@@ -1300,6 +1309,7 @@ validatorRouter.post("/validate/otp", validatorMiddleware, async (req: Request, 
             });
         }
 
+        // Quick pre-check outside the transaction (cheap fail-fast; not the real guard)
         if (!findTicket.is_valid || findTicket.status === "CANCELLED" || findTicket.status === "EXPIRED") {
             return res.status(409).json({
                 message: "The given ticket is invalid",
@@ -1316,16 +1326,17 @@ validatorRouter.post("/validate/otp", validatorMiddleware, async (req: Request, 
             });
         }
 
-        const otpRecord = await db.otp.findFirst({
-            where: {
-                ticketId: findTicket.id,
-                otp_code: otp_code as string,
-                purpose: "ticket_validation",
-                is_used: false,
-            },
+        // Debug aid: confirm the OTP row actually exists before trying the atomic update.
+        // Safe to remove once confirmed working.
+
+        const debugOtp = await db.otp.findFirst({
+            where: { ticketId: findTicket.id, otp_code: otp_code as string },
+            orderBy: { created_at: "desc" },
         });
 
-        if (!otpRecord) {
+        console.log("Matching OTP row (pre-transaction):", debugOtp);
+
+        if (!debugOtp) {
             return res.status(404).json({
                 message: "Invalid OTP code",
                 error: true,
@@ -1333,7 +1344,15 @@ validatorRouter.post("/validate/otp", validatorMiddleware, async (req: Request, 
             });
         }
 
-        if (otpRecord.expires_at < new Date()) {
+        if (debugOtp.is_used) {
+            return res.status(409).json({
+                message: "This OTP has already been used",
+                error: true,
+                success: false,
+            });
+        }
+
+        if (debugOtp.expires_at < new Date()) {
             return res.status(410).json({
                 message: "OTP has expired",
                 error: true,
@@ -1342,6 +1361,52 @@ validatorRouter.post("/validate/otp", validatorMiddleware, async (req: Request, 
         }
 
         const result = await db.$transaction(async (tx) => {
+            // Atomic claim on the OTP: only matches if unused. This is the real guard,
+            // not the earlier findTicket checks above, which can go stale under concurrency.
+            const otpUpdate = await tx.otp.updateMany({
+                where: {
+                    ticketId: findTicket.id,
+                    otp_code: otp_code as string,
+                    purpose: "ticket_validation",
+                    is_used: false,
+                    expires_at: { gt: new Date() },
+                },
+                data: { is_used: true },
+            });
+
+            if (otpUpdate.count === 0) {
+                throw new Error("OTP_INVALID_OR_USED");
+            }
+
+            // Atomic claim on the ticket: only matches if still unverified.
+            // This is what actually prevents double-redemption under load.
+            const ticketUpdate = await tx.ticket.updateMany({
+                where: {
+                    id: findTicket.id,
+                    is_verified: false,
+                    status: { notIn: ["USED", "CANCELLED", "EXPIRED"] },
+                },
+                data: {
+                    is_verified: true,
+                    status: "USED",
+                    scanned_at: new Date(),
+                    scannedById: verifierId as string,
+                },
+            });
+
+            if (ticketUpdate.count === 0) {
+                throw new Error("TICKET_ALREADY_USED");
+            }
+
+            // Fetch the actual OTP row so we have its id for the verification + FK link
+            const otpRecord = await tx.otp.findFirst({
+                where: {
+                    ticketId: findTicket.id,
+                    otp_code: otp_code as string,
+                },
+                orderBy: { created_at: "desc" },
+            });
+
             const verification = await tx.ticketVerification.create({
                 data: {
                     ticketId: findTicket.id,
@@ -1351,22 +1416,15 @@ validatorRouter.post("/validate/otp", validatorMiddleware, async (req: Request, 
                 },
             });
 
-            await tx.otp.update({
-                where: { id: otpRecord.id },
-                data: { is_used: true, ticketVerificationId: verification.id },
-            });
+            // Link the OTP to this verification record
+            if (otpRecord) {
+                await tx.otp.update({
+                    where: { id: otpRecord.id },
+                    data: { ticketVerificationId: verification.id },
+                });
+            }
 
-            const updatedTicket = await tx.ticket.update({
-                where: { id: findTicket.id },
-                data: {
-                    is_verified: true,
-                    status: "USED",
-                    scanned_at: new Date(),
-                    scannedById: verifierId as string,
-                },
-            });
-
-            return { verification, updatedTicket };
+            return { verification };
         });
 
         return res.status(200).json({
@@ -1376,9 +1434,23 @@ validatorRouter.post("/validate/otp", validatorMiddleware, async (req: Request, 
             data: result,
         });
 
-    } catch (error) {
+    } catch (error: any) {
+        if (error.message === "OTP_INVALID_OR_USED") {
+            return res.status(404).json({
+                message: "Invalid, expired, or already-used OTP",
+                error: true,
+                success: false,
+            });
+        }
+        if (error.message === "TICKET_ALREADY_USED") {
+            return res.status(409).json({
+                message: "The given ticket is already used",
+                error: true,
+                success: false,
+            });
+        }
         console.error("Validation Error:", error);
-        res.status(500).json({
+        return res.status(500).json({
             message: "Internal server error",
             error: true,
             success: false,
